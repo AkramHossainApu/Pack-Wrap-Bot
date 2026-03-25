@@ -39,6 +39,16 @@ INVENTORY = {
 
 # --- SERVER LOGIC ---
 class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
     def do_POST(self):
         global BOT_ACTIVE, STATS, DELIVERY_CHARGE
         content_length = int(self.headers.get('Content-Length', 0))
@@ -47,6 +57,7 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         if hashlib.sha256(data.get('password', '').encode()).hexdigest() != DASHBOARD_PASSWORD_HASH:
             self.send_response(401); self.end_headers(); return
 
+        res = {"status": "error"}
         if self.path == '/api/stats':
             uptime = f"{int((time.time()-BOT_START_TIME)//3600)}h {int(((time.time()-BOT_START_TIME)%3600)//60)}m"
             res = {"status": "online" if BOT_ACTIVE else "off", "uptime": uptime, "total_orders": STATS["total_orders"], "total_revenue": STATS["total_revenue"]}
@@ -57,12 +68,21 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
             elif action == 'set_delivery': DELIVERY_CHARGE = int(data.get('value', 60))
             res = {"status": "success"}
         
-        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Access-Control-Allow-Origin', '*'); self.end_headers()
+        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
         self.wfile.write(json.dumps(res).encode())
 
     def do_GET(self):
         self.path = '/index.html' if self.path == '/' else self.path
         return super().do_GET()
+
+class ReuseTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+def run_server():
+    """This was the missing function!"""
+    with ReuseTCPServer(("", PORT), AdminDashboardHandler) as httpd:
+        print(f"🌐 Dashboard active on port {PORT}")
+        httpd.serve_forever()
 
 # --- BOT LOGIC ---
 SELECT_PRODUCT, SELECT_VARIANT, SELECT_SIZE, SELECT_QUANTITY, CHECKOUT = range(5)
@@ -121,18 +141,18 @@ async def select_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return SELECT_QUANTITY
 
 async def process_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    qty = update.message.text
-    if not qty.isdigit():
-        await update.message.reply_text("Enter a number:")
+    qty_text = update.message.text
+    if not qty_text.isdigit():
+        await update.message.reply_text("Please enter a valid number:")
         return SELECT_QUANTITY
     
     item = context.user_data['current']
-    item['qty'] = int(qty)
+    item['qty'] = int(qty_text)
     item['total'] = item['qty'] * INVENTORY[item['product']]['price']
     context.user_data['cart'].append(item)
     
     keyboard = [[InlineKeyboardButton("🛒 Add More", callback_data="add_more")], [InlineKeyboardButton("✅ Finish", callback_data="finish")]]
-    await update.message.reply_text(f"Added {qty} units! Next?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"Added {qty_text} units! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
 async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -140,7 +160,9 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if query.data == "add_more": return await show_products(update, context)
     
     cart = context.user_data['cart']
-    clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your)", "", context.user_data['customer_info'], flags=re.IGNORECASE).strip()
+    # Filter out instructions from customer info
+    raw_info = context.user_data['customer_info']
+    clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your)", "", raw_info, flags=re.IGNORECASE).strip()
     
     inv = f"📦 Pack & Wrap Invoice\n{'-'*25}\nCustomer:\n{clean_info}\n{'-'*25}\nItems:\n"
     subtotal = sum(i['total'] for i in cart)
@@ -161,17 +183,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await show_products(update, context)
 
 def main():
+    # 1. Start Web Server
     threading.Thread(target=run_server, daemon=True).start()
+    
+    # 2. Start Bot
     app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
     
+    order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
     conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(re.compile(r"(Name:|নাম:)", re.I)), start), CommandHandler('start', start)],
+        entry_points=[
+            MessageHandler(filters.Regex(order_trigger), start), 
+            CommandHandler('start', start)
+        ],
         states={
             SELECT_PRODUCT: [CallbackQueryHandler(select_variant, pattern='^prod_')],
-            SELECT_VARIANT: [CallbackQueryHandler(select_size, pattern='^var_'), CallbackQueryHandler(show_products, pattern='^back_to_prod$')],
-            SELECT_SIZE: [CallbackQueryHandler(select_qty, pattern='^size_'), CallbackQueryHandler(select_variant, pattern='^back_to_var$')],
-            SELECT_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_qty), CallbackQueryHandler(select_size, pattern='^back_to_size$')],
-            CHECKOUT: [CallbackQueryHandler(generate_invoice, pattern='^finish$'), CallbackQueryHandler(show_products, pattern='^add_more$')]
+            SELECT_VARIANT: [
+                CallbackQueryHandler(select_size, pattern='^var_'), 
+                CallbackQueryHandler(show_products, pattern='^back_to_prod$')
+            ],
+            SELECT_SIZE: [
+                CallbackQueryHandler(select_qty, pattern='^size_'), 
+                CallbackQueryHandler(select_variant, pattern='^back_to_var$')
+            ],
+            SELECT_QUANTITY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_qty), 
+                CallbackQueryHandler(select_size, pattern='^back_to_size$')
+            ],
+            CHECKOUT: [
+                CallbackQueryHandler(generate_invoice, pattern='^finish$'), 
+                CallbackQueryHandler(show_products, pattern='^add_more$')
+            ]
         },
         fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)]
     )
