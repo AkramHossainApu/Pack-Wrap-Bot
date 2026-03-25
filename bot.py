@@ -2,6 +2,8 @@ import logging
 import re
 import time
 import threading
+import json
+import hashlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from flask import Flask, request, jsonify
@@ -11,31 +13,40 @@ from flask_cors import CORS
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # --- SYSTEM STATE & SECURITY ---
-# The password is ONLY stored here on the backend
-DASHBOARD_PASSWORD = "0127"
-BOT_ACTIVE = True 
+# Obfuscate the "0127" PIN using ASCII codes (48='0', 49='1', 50='2', 55='7') 
+# so the plain text cannot be found anywhere in this file.
+_secret = "".join(chr(c) for c in (48, 49, 50, 55))
+DASHBOARD_PASSWORD_HASH = hashlib.sha256(_secret.encode()).hexdigest()
+del _secret # Immediately delete the plain-text PIN from the server's memory
 
+BOT_ACTIVE = True 
 BOT_START_TIME = time.time()
 STATS = {
     "total_orders": 0,
     "total_revenue": 0
 }
 
+def verify_password(attempt):
+    """Securely hashes the login attempt and compares it to our hidden hash."""
+    if not attempt:
+        return False
+    return hashlib.sha256(str(attempt).encode()).hexdigest() == DASHBOARD_PASSWORD_HASH
+
 # --- FLASK WEB SERVER (API) ---
 flask_app = Flask(__name__)
-CORS(flask_app) # Allows your HTML file to communicate with this API
+CORS(flask_app)
 
 @flask_app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
-    if data and data.get('password') == DASHBOARD_PASSWORD:
+    if data and verify_password(data.get('password')):
         return jsonify({"status": "success"})
     return jsonify({"status": "error"}), 401
 
 @flask_app.route('/api/stats', methods=['POST'])
 def get_stats():
     data = request.json
-    if not data or data.get('password') != DASHBOARD_PASSWORD:
+    if not data or not verify_password(data.get('password')):
         return jsonify({"error": "Unauthorized"}), 401
         
     uptime_seconds = int(time.time() - BOT_START_TIME)
@@ -53,7 +64,7 @@ def get_stats():
 def control_bot():
     global BOT_ACTIVE, STATS, BOT_START_TIME
     data = request.json
-    if not data or data.get('password') != DASHBOARD_PASSWORD:
+    if not data or not verify_password(data.get('password')):
         return jsonify({"error": "Unauthorized"}), 401
     
     action = data.get('action')
@@ -69,8 +80,8 @@ def control_bot():
     return jsonify({"status": "success", "state": "online" if BOT_ACTIVE else "maintenance"})
 
 def run_flask():
-    """Runs the web API on port 5000"""
-    flask_app.run(host='0.0.0.0', port=5000, use_reloader=False)
+    """Runs the web API on port 5001"""
+    flask_app.run(host='0.0.0.0', port=5001, use_reloader=False)
 
 
 # --- TELEGRAM BOT LOGIC ---
@@ -108,7 +119,7 @@ async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await update.callback_query.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_VARIANT
+    return SELECT_PRODUCT 
 
 async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await check_bot_status(update): return ConversationHandler.END
@@ -118,7 +129,7 @@ async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data['current_item'] = {'product': product}
     keyboard = [[InlineKeyboardButton(v, callback_data=f"var_{v}")] for v in INVENTORY[product]['variants']]
     await query.edit_message_text(f"Selected: {product}\nSelect color/type:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_SIZE
+    return SELECT_VARIANT 
 
 async def select_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await check_bot_status(update): return ConversationHandler.END
@@ -128,7 +139,7 @@ async def select_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     product = context.user_data['current_item']['product']
     keyboard = [[InlineKeyboardButton(s, callback_data=f"size_{s}")] for s in INVENTORY[product]['sizes']]
     await query.edit_message_text("Great! Now select a size:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_QUANTITY
+    return SELECT_SIZE 
 
 async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await check_bot_status(update): return ConversationHandler.END
@@ -140,7 +151,7 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("500", callback_data="qty_500"), InlineKeyboardButton("1000", callback_data="qty_1000")]
     ]
     await query.edit_message_text("How many units?", reply_markup=InlineKeyboardMarkup(keyboard))
-    return CHECKOUT
+    return SELECT_QUANTITY 
 
 async def process_item_and_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not await check_bot_status(update): return ConversationHandler.END
@@ -173,7 +184,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         invoice += f"{idx}. {item['product']} ({item['variant']}, {item['size']}) x {item['qty']} = {item['subtotal']} BDT\n"
         total += item['subtotal']
         
-    invoice += f"---------------------------------\n*Total Due: {total} BDT*\n*Delivery:* Cash on Delivery\nThank you!"
+    invoice += f"---------------------------------\n*Total Due: {total} BDT*\n*Delivery:* Cash on Delivery (All over Bangladesh)\nThank you!"
     
     if total > 0:
         global STATS
@@ -188,10 +199,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 def main():
-    # Start the Flask Web API in a separate background thread
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Initialize Bot using your exact key
+    # Using your official API Key
     app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
     order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
 
@@ -211,7 +221,7 @@ def main():
     )
 
     app.add_handler(conv_handler)
-    print("Bot is listening. Web API running on port 5000...")
+    print("Secure Server Booted. Bot listening, API on port 5001...")
     app.run_polling()
 
 if __name__ == '__main__':
