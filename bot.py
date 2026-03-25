@@ -1,179 +1,198 @@
 import logging
 import re
+import time
+import threading
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Define conversation states
-SELECT_PRODUCT, SELECT_VARIANT, SELECT_SIZE, SELECT_QUANTITY, CHECKOUT = range(5)
+# --- SYSTEM STATE & SECURITY ---
+# The password is ONLY stored here on the backend
+DASHBOARD_PASSWORD = "0127"
+BOT_ACTIVE = True 
 
-# Pack & Wrap Custom Inventory
-INVENTORY = {
-    "Courier Poly": {
-        "variants": ["White", "Silver", "White Printed"],
-        "sizes": ["10x14", "12x16", "15x20"],
-        "price": 15
-    },
-    "Bubble Wrap": {
-        "variants": ["Premium", "Standard"],
-        "sizes": ["1 Meter", "5 Meter", "10 Meter"],
-        "price": 50
-    },
-    "Cellophane Poly": {
-        "variants": ["Transparent"],
-        "sizes": ["Small", "Large"],
-        "price": 10
-    },
-    "Boxes": {
-        "variants": ["Cartoon Box", "Die-Cut Box"],
-        "sizes": ["Small", "Medium", "Large"],
-        "price": 30
-    }
+BOT_START_TIME = time.time()
+STATS = {
+    "total_orders": 0,
+    "total_revenue": 0
 }
 
+# --- FLASK WEB SERVER (API) ---
+flask_app = Flask(__name__)
+CORS(flask_app) # Allows your HTML file to communicate with this API
+
+@flask_app.route('/api/login', methods=['POST'])
+def login():
+    data = request.json
+    if data and data.get('password') == DASHBOARD_PASSWORD:
+        return jsonify({"status": "success"})
+    return jsonify({"status": "error"}), 401
+
+@flask_app.route('/api/stats', methods=['POST'])
+def get_stats():
+    data = request.json
+    if not data or data.get('password') != DASHBOARD_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    uptime_seconds = int(time.time() - BOT_START_TIME)
+    hours, remainder = divmod(uptime_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+    
+    return jsonify({
+        "status": "online" if BOT_ACTIVE else "maintenance",
+        "uptime": f"{hours}h {minutes}m",
+        "total_orders": STATS["total_orders"],
+        "total_revenue": STATS["total_revenue"]
+    })
+
+@flask_app.route('/api/control', methods=['POST'])
+def control_bot():
+    global BOT_ACTIVE, STATS, BOT_START_TIME
+    data = request.json
+    if not data or data.get('password') != DASHBOARD_PASSWORD:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    action = data.get('action')
+    if action == 'start':
+        BOT_ACTIVE = True
+    elif action == 'stop':
+        BOT_ACTIVE = False
+    elif action == 'restart':
+        BOT_ACTIVE = True
+        STATS = {"total_orders": 0, "total_revenue": 0}
+        BOT_START_TIME = time.time()
+        
+    return jsonify({"status": "success", "state": "online" if BOT_ACTIVE else "maintenance"})
+
+def run_flask():
+    """Runs the web API on port 5000"""
+    flask_app.run(host='0.0.0.0', port=5000, use_reloader=False)
+
+
+# --- TELEGRAM BOT LOGIC ---
+SELECT_PRODUCT, SELECT_VARIANT, SELECT_SIZE, SELECT_QUANTITY, CHECKOUT = range(5)
+
+INVENTORY = {
+    "Courier Poly": { "variants": ["White", "Silver", "Printed"], "sizes": ["10x14", "12x16", "15x20"], "price": 15 },
+    "Bubble Wrap": { "variants": ["Premium", "Standard"], "sizes": ["1 Meter", "5 Meter", "10 Meter"], "price": 50 },
+    "Cellophane Poly": { "variants": ["Transparent"], "sizes": ["Small", "Large"], "price": 10 },
+    "Boxes": { "variants": ["Cartoon", "Die-Cut"], "sizes": ["Small", "Medium", "Large"], "price": 30 }
+}
+
+async def check_bot_status(update: Update) -> bool:
+    """Helper to check if the bot is active before processing orders."""
+    if not BOT_ACTIVE:
+        msg = "⚙️ Our ordering system is currently offline for maintenance. Please try again later."
+        if update.message:
+            await update.message.reply_text(msg)
+        elif update.callback_query:
+            await update.callback_query.answer("System Offline", show_alert=True)
+            await update.callback_query.message.edit_text(msg)
+        return False
+    return True
+
 async def process_initial_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Detects pasted customer details, saves them, and shows products."""
-    # Initialize an empty cart for this user session
+    if not await check_bot_status(update): return ConversationHandler.END
     context.user_data['cart'] = [] 
-    
-    # Save the text block they just pasted
     context.user_data['customer_info'] = update.message.text
-    
     await update.message.reply_text("Details saved! Let's build your order.")
     return await show_products(update, context)
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Shows the main product list."""
-    keyboard = []
-    for product in INVENTORY.keys():
-        keyboard.append([InlineKeyboardButton(product, callback_data=f"prod_{product}")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+    keyboard = [[InlineKeyboardButton(p, callback_data=f"prod_{p}")] for p in INVENTORY.keys()]
     if update.callback_query:
-        await update.callback_query.message.reply_text("Please select a product:", reply_markup=reply_markup)
+        await update.callback_query.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await update.message.reply_text("Please select a product:", reply_markup=reply_markup)
-        
+        await update.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_VARIANT
 
 async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Shows variations/colors/types for the selected product."""
+    if not await check_bot_status(update): return ConversationHandler.END
     query = update.callback_query
     await query.answer()
-    
     product = query.data.replace("prod_", "")
     context.user_data['current_item'] = {'product': product}
-    
-    variants = INVENTORY[product]['variants']
-    keyboard = [[InlineKeyboardButton(var, callback_data=f"var_{var}")] for var in variants]
-    
-    await query.edit_message_text(f"Selected: {product}\nNow, select a variation/color:", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(v, callback_data=f"var_{v}")] for v in INVENTORY[product]['variants']]
+    await query.edit_message_text(f"Selected: {product}\nSelect color/type:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_SIZE
 
 async def select_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Shows sizes for the selected product."""
+    if not await check_bot_status(update): return ConversationHandler.END
     query = update.callback_query
     await query.answer()
-    
-    variant = query.data.replace("var_", "")
-    context.user_data['current_item']['variant'] = variant
+    context.user_data['current_item']['variant'] = query.data.replace("var_", "")
     product = context.user_data['current_item']['product']
-    
-    sizes = INVENTORY[product]['sizes']
-    keyboard = [[InlineKeyboardButton(size, callback_data=f"size_{size}")] for size in sizes]
-    
+    keyboard = [[InlineKeyboardButton(s, callback_data=f"size_{s}")] for s in INVENTORY[product]['sizes']]
     await query.edit_message_text("Great! Now select a size:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_QUANTITY
 
 async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Shows quantity options."""
+    if not await check_bot_status(update): return ConversationHandler.END
     query = update.callback_query
     await query.answer()
-    
-    size = query.data.replace("size_", "")
-    context.user_data['current_item']['size'] = size
-    
+    context.user_data['current_item']['size'] = query.data.replace("size_", "")
     keyboard = [
         [InlineKeyboardButton("50", callback_data="qty_50"), InlineKeyboardButton("100", callback_data="qty_100")],
         [InlineKeyboardButton("500", callback_data="qty_500"), InlineKeyboardButton("1000", callback_data="qty_1000")]
     ]
-    
-    await query.edit_message_text("How many units do you need?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("How many units?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
 async def process_item_and_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Adds item to cart and asks to checkout or add more."""
+    if not await check_bot_status(update): return ConversationHandler.END
     query = update.callback_query
     await query.answer()
-    
     if query.data.startswith("qty_"):
         qty = int(query.data.replace("qty_", ""))
         context.user_data['current_item']['qty'] = qty
-        
-        # Calculate price
         product = context.user_data['current_item']['product']
-        unit_price = INVENTORY[product]['price']
-        context.user_data['current_item']['subtotal'] = unit_price * qty
-        
-        # Add to cart
+        context.user_data['current_item']['subtotal'] = INVENTORY[product]['price'] * qty
         context.user_data['cart'].append(context.user_data['current_item'])
     
     keyboard = [
         [InlineKeyboardButton("🛒 Add Another Item", callback_data="add_more")],
         [InlineKeyboardButton("✅ Generate Invoice", callback_data="finish_order")]
     ]
-    
-    await query.edit_message_text("Item added to cart! What would you like to do next?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text("Item added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
 async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Generates the final invoice message."""
+    if not await check_bot_status(update): return ConversationHandler.END
     query = update.callback_query
     await query.answer()
-    
-    if query.data == "add_more":
-        return await show_products(update, context)
+    if query.data == "add_more": return await show_products(update, context)
         
     cart = context.user_data.get('cart', [])
-    customer_info = context.user_data.get('customer_info', 'No details provided.')
-    
-    invoice = "📦 *Pack & Wrap - Final Invoice* 📦\n"
-    invoice += "---------------------------------\n"
-    invoice += f"*Customer Details:*\n{customer_info}\n"
-    invoice += "---------------------------------\n"
-    invoice += "*Order Summary:*\n"
-    
+    invoice = f"📦 *Pack & Wrap - Final Invoice* 📦\n---------------------------------\n*Customer Details:*\n{context.user_data.get('customer_info', '')}\n---------------------------------\n*Order Summary:*\n"
     total = 0
     for idx, item in enumerate(cart, 1):
-        name = item['product']
-        var = item['variant']
-        size = item['size']
-        qty = item['qty']
-        sub = item['subtotal']
-        total += sub
-        invoice += f"{idx}. {name} ({var}, {size}) x {qty} = {sub} BDT\n"
+        invoice += f"{idx}. {item['product']} ({item['variant']}, {item['size']}) x {item['qty']} = {item['subtotal']} BDT\n"
+        total += item['subtotal']
         
-    invoice += "---------------------------------\n"
-    invoice += f"*Total Due: {total} BDT*\n"
-    invoice += "*Delivery:* Cash on Delivery (All over Bangladesh)\n\n"
-    invoice += "Thank you for your order! We will process it shortly."
+    invoice += f"---------------------------------\n*Total Due: {total} BDT*\n*Delivery:* Cash on Delivery\nThank you!"
+    
+    if total > 0:
+        global STATS
+        STATS["total_orders"] += 1
+        STATS["total_revenue"] += total
     
     await query.edit_message_text(invoice, parse_mode='Markdown')
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancels and ends the conversation."""
-    await update.message.reply_text("Order cancelled. Paste your details to start a new order.")
+    await update.message.reply_text("Order cancelled.")
     return ConversationHandler.END
 
 def main():
-    # REPLACE WITH YOUR ACTUAL TOKEN
-    app = ApplicationBuilder().token('YOUR_TELEGRAM_BOT_TOKEN').build()
+    # Start the Flask Web API in a separate background thread
+    threading.Thread(target=run_flask, daemon=True).start()
 
-    # Regex looks for "Name:" or "নাম:" (case-insensitive) anywhere in the message
+    # Initialize Bot using your exact key
+    app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
     order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
 
     conv_handler = ConversationHandler(
@@ -192,7 +211,7 @@ def main():
     )
 
     app.add_handler(conv_handler)
-    print("Bot is listening for orders 24/7...")
+    print("Bot is listening. Web API running on port 5000...")
     app.run_polling()
 
 if __name__ == '__main__':

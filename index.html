@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pack & Wrap Admin</title>
+    <style>
+        :root { --bg: #121212; --card: #1e1e1e; --text: #fff; --accent: #bb86fc; --red: #cf6679; --green: #03dac6; }
+        body { font-family: sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        
+        /* Login Overlay */
+        #login-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; }
+        #login-screen input { padding: 10px; font-size: 18px; text-align: center; margin-bottom: 10px; border-radius: 5px; border: none; }
+        #login-screen button { padding: 10px 20px; font-size: 16px; background: var(--accent); color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        #error-msg { color: var(--red); margin-top: 10px; display: none; }
+
+        /* Dashboard */
+        #dashboard { display: none; width: 100%; max-width: 800px; text-align: center; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
+        .card { background: var(--card); padding: 20px; border-radius: 8px; border-top: 3px solid var(--accent); }
+        .value { font-size: 28px; font-weight: bold; margin-top: 10px; }
+        
+        /* Controls */
+        .controls { display: flex; gap: 10px; justify-content: center; background: var(--card); padding: 20px; border-radius: 8px; }
+        .btn { padding: 12px 20px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; color: #000; font-size: 14px; }
+        .btn-start { background: var(--green); }
+        .btn-stop { background: var(--red); color: white;}
+        .btn-restart { background: #ffb300; }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <h2>Admin Login</h2>
+        <input type="password" id="pass-input" placeholder="Enter PIN">
+        <button onclick="attemptLogin()">Unlock Dashboard</button>
+        <p id="error-msg">Incorrect PIN</p>
+    </div>
+
+    <div id="dashboard">
+        <h1 style="color: var(--accent)">📦 Pack & Wrap Command Center</h1>
+        
+        <div class="grid">
+            <div class="card">
+                <div>Bot Status</div>
+                <div class="value" id="status-val">Checking...</div>
+            </div>
+            <div class="card">
+                <div>Uptime</div>
+                <div class="value" id="uptime-val">0h 0m</div>
+            </div>
+            <div class="card">
+                <div>Orders Processed</div>
+                <div class="value" id="orders-val">0</div>
+            </div>
+            <div class="card">
+                <div>Revenue (BDT)</div>
+                <div class="value" id="revenue-val">0</div>
+            </div>
+        </div>
+
+        <h3>System Controls</h3>
+        <div class="controls">
+            <button class="btn btn-start" onclick="controlBot('start')">▶ Turn ON</button>
+            <button class="btn btn-stop" onclick="controlBot('stop')">⏸ Turn OFF</button>
+            <button class="btn btn-restart" onclick="controlBot('restart')">🔄 Hard Restart</button>
+        </div>
+    </div>
+
+    <script>
+        let sessionPass = "";
+        // If you host the HTML on the same server, this will auto-detect the IP. 
+        // If not, change this to "http://YOUR_SERVER_IP:5000"
+        const API_BASE = `http://${window.location.hostname}:5000/api`;
+
+        async function attemptLogin() {
+            const pass = document.getElementById('pass-input').value;
+            try {
+                const res = await fetch(`${API_BASE}/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pass })
+                });
+                
+                if (res.ok) {
+                    sessionPass = pass;
+                    document.getElementById('login-screen').style.display = 'none';
+                    document.getElementById('dashboard').style.display = 'block';
+                    fetchStats(); // Load stats immediately
+                    setInterval(fetchStats, 5000); // Auto-refresh every 5 seconds
+                } else {
+                    document.getElementById('error-msg').style.display = 'block';
+                }
+            } catch (e) {
+                alert("Cannot connect to the Bot server. Is the Python script running?");
+            }
+        }
+
+        async function fetchStats() {
+            if (!sessionPass) return;
+            const res = await fetch(`${API_BASE}/stats`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: sessionPass })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                document.getElementById('status-val').innerText = data.status.toUpperCase();
+                document.getElementById('status-val').style.color = data.status === 'online' ? 'var(--green)' : 'var(--red)';
+                document.getElementById('uptime-val').innerText = data.uptime;
+                document.getElementById('orders-val').innerText = data.total_orders;
+                document.getElementById('revenue-val').innerText = data.total_revenue.toLocaleString();
+            }
+        }
+
+        async function controlBot(action) {
+            if (!sessionPass) return;
+            if (action === 'restart' && !confirm("This will reset your Revenue and Order stats back to 0. Are you sure?")) return;
+            
+            await fetch(`${API_BASE}/control`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: sessionPass, action: action })
+            });
+            fetchStats(); // Update UI immediately
+        }
+    </script>
+</body>
+</html>
