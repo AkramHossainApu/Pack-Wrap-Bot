@@ -113,11 +113,48 @@ def run_server():
 # --- TELEGRAM BOT LOGIC ---
 SELECT_PRODUCT, SELECT_VARIANT, SELECT_SIZE, SELECT_QUANTITY, CHECKOUT = range(5)
 
+# --- NEW FULL ENGLISH INVENTORY ---
 INVENTORY = {
-    "Courier Poly": { "variants": ["White", "Silver", "Printed"], "sizes": ["10x14", "12x16", "15x20"], "price": 15 },
-    "Bubble Wrap": { "variants": ["Premium", "Standard"], "sizes": ["1 Meter", "5 Meter", "10 Meter"], "price": 50 },
-    "Cellophane Poly": { "variants": ["Transparent"], "sizes": ["Small", "Large"], "price": 10 },
-    "Boxes": { "variants": ["Cartoon", "Die-Cut"], "sizes": ["Small", "Medium", "Large"], "price": 30 }
+    "Courier Poly": { 
+        "variants": ["White", "Silver", "Pink", "Yellow"], 
+        "sizes": ["10x14", "12x16", "15x20"], 
+        "price": 15 
+    },
+    "Printed Courier Poly": { 
+        "variants": ["White", "Silver"], 
+        "sizes": ["10x14", "12x16", "15x20"], 
+        "price": 18 
+    },
+    "Invoice Courier Poly": { 
+        "variants": ["Standard"], 
+        "sizes": ["10x14", "12x16"], 
+        "price": 20 
+    },
+    "Die-Cut Box": { 
+        "variants": ["Brown", "White"], 
+        "sizes": ["Small", "Medium", "Large"], 
+        "price": 30 
+    },
+    "Carton Box": { 
+        "variants": ["Local", "Korean"], 
+        "sizes": ["Small", "Medium", "Large"], 
+        "price": 35 
+    },
+    "Cellophane Poly": { 
+        "variants": ["Transparent"], 
+        "sizes": ["Small", "Large"], 
+        "price": 10 
+    },
+    "Bubble Wrap": { 
+        "variants": ["Premium"], 
+        "sizes": ["1 Meter", "5 Meter", "10 Meter"], 
+        "price": 50 
+    },
+    "Round Logo Sticker": { 
+        "variants": ["Standard"], 
+        "sizes": ['1"', '1.5"', '2"', '2.5"'], 
+        "price": 2 
+    }
 }
 
 async def check_bot_status(update: Update) -> bool:
@@ -131,18 +168,32 @@ async def check_bot_status(update: Update) -> bool:
     return True
 
 async def process_initial_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Triggered by pasting 'Name:' or sending /start"""
     if not await check_bot_status(update): return ConversationHandler.END
     context.user_data['cart'] = [] 
-    context.user_data['customer_info'] = update.message.text
+    
+    # Save the text if they pasted their details. If they just sent /start, save a placeholder.
+    if update.message.text.lower() == '/start':
+        context.user_data['customer_info'] = "Details will be provided at checkout."
+    else:
+        context.user_data['customer_info'] = update.message.text
+
     context.user_data['is_new_order'] = True # Flag to show the combined text
     return await show_products(update, context)
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    keyboard = [[InlineKeyboardButton(p, callback_data=f"prod_{p}")] for p in INVENTORY.keys()]
+    keyboard = []
+    # Dynamic grid layout for products (2 buttons per row)
+    items = list(INVENTORY.keys())
+    for i in range(0, len(items), 2):
+        row = [InlineKeyboardButton(items[i], callback_data=f"prod_{items[i]}")]
+        if i + 1 < len(items):
+            row.append(InlineKeyboardButton(items[i+1], callback_data=f"prod_{items[i+1]}"))
+        keyboard.append(row)
     
     # Check if this is the very first step to combine the messages
     if context.user_data.get('is_new_order'):
-        text = "Details saved! Let's build your order.\nPlease select a product:"
+        text = "Details saved! Let's build your order.\n\nPlease select a product:"
         context.user_data['is_new_order'] = False # Reset the flag
     else:
         text = "Please select a product:"
@@ -160,7 +211,7 @@ async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     product = query.data.replace("prod_", "")
     context.user_data['current_item'] = {'product': product}
     keyboard = [[InlineKeyboardButton(v, callback_data=f"var_{v}")] for v in INVENTORY[product]['variants']]
-    await query.edit_message_text(f"Selected: {product}\nSelect color/type:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"Selected: {product}\nSelect variation/color:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_VARIANT 
 
 async def select_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -179,17 +230,14 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     context.user_data['current_item']['size'] = query.data.replace("size_", "")
     
-    # We remove the keyboard and ask them to type the number instead
     await query.edit_message_text("✏️ Please type the exact quantity you need (e.g., 150):")
     return SELECT_QUANTITY 
 
 async def process_quantity_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Catches the manually typed quantity, calculates subtotal, and proceeds to checkout."""
     if not await check_bot_status(update): return ConversationHandler.END
     
     user_input = update.message.text.strip()
     
-    # Make sure they actually typed a number
     if not user_input.isdigit():
         await update.message.reply_text("❌ Please enter a valid number for the quantity:")
         return SELECT_QUANTITY
@@ -212,7 +260,6 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
     cart = context.user_data.get('cart', [])
     
-    # Building a clean, text-only invoice string
     invoice_text = "📦 Pack & Wrap - Final Invoice 📦\n"
     invoice_text += "---------------------------------\n"
     invoice_text += f"Customer Details:\n{context.user_data.get('customer_info', '')}\n"
@@ -234,7 +281,6 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         STATS["total_orders"] += 1
         STATS["total_revenue"] += total
     
-    # We wrap the invoice inside an HTML <code> tag to make it tap-to-copy
     final_message = f"✅ Order complete! Tap the text box below to instantly copy your invoice:\n\n<code>{invoice_text}</code>"
     
     await query.edit_message_text(final_message, parse_mode='HTML')
@@ -248,15 +294,19 @@ def main():
     threading.Thread(target=run_server, daemon=True).start()
 
     app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
+    
+    # Trigger regex
     order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
 
     conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(order_trigger), process_initial_order)],
+        entry_points=[
+            MessageHandler(filters.Regex(order_trigger), process_initial_order),
+            CommandHandler('start', process_initial_order) # Allows /start command again
+        ],
         states={
             SELECT_PRODUCT: [CallbackQueryHandler(select_variant, pattern='^prod_')],
             SELECT_VARIANT: [CallbackQueryHandler(select_size, pattern='^var_')],
             SELECT_SIZE: [CallbackQueryHandler(select_quantity, pattern='^size_')],
-            # Notice this changed to a MessageHandler to catch the typed numbers
             SELECT_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity_input)],
             CHECKOUT: [
                 CallbackQueryHandler(generate_invoice, pattern='^(add_more|finish_order)$')
