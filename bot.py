@@ -14,7 +14,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # --- SYSTEM STATE & SECURITY ---
-# Secure PIN generation (0127)
 _secret = "".join(chr(c) for c in (48, 49, 50, 55))
 DASHBOARD_PASSWORD_HASH = hashlib.sha256(_secret.encode()).hexdigest()
 del _secret
@@ -26,7 +25,6 @@ STATS = {
     "total_revenue": 0
 }
 
-# Automatically use the port Render assigns, or default to 10000 locally
 PORT = int(os.environ.get("PORT", 10000))
 
 def verify_password(attempt):
@@ -58,7 +56,6 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode('utf-8'))
 
     def do_POST(self):
-        """Handle incoming API requests from the dashboard."""
         global BOT_ACTIVE, STATS, BOT_START_TIME
         
         content_length = int(self.headers.get('Content-Length', 0))
@@ -69,15 +66,12 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         except json.JSONDecodeError:
             return self.send_json({"error": "Invalid JSON"}, 400)
 
-        # Protect all endpoints with the PIN
         if not verify_password(data.get('password')):
             return self.send_json({"error": "Unauthorized"}, 401)
 
-        # 1. Login Endpoint
         if self.path == '/api/login':
             return self.send_json({"status": "success"})
 
-        # 2. Stats Endpoint
         elif self.path == '/api/stats':
             uptime_seconds = int(time.time() - BOT_START_TIME)
             hours, remainder = divmod(uptime_seconds, 3600)
@@ -89,7 +83,6 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
                 "total_revenue": STATS["total_revenue"]
             })
 
-        # 3. Control Endpoint
         elif self.path == '/api/control':
             action = data.get('action')
             if action == 'start': BOT_ACTIVE = True
@@ -103,7 +96,6 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_json({"error": "Not found"}, 404)
 
     def do_GET(self):
-        """Serve the HTML dashboard."""
         path = self.translate_path(self.path)
         if not os.path.exists(path) and '.' not in self.path:
             self.path = '/index.html'
@@ -116,6 +108,7 @@ def run_server():
     with ReuseTCPServer(("", PORT), AdminDashboardHandler) as httpd:
         print(f"🌐 Admin Dashboard running on port {PORT}")
         httpd.serve_forever()
+
 
 # --- TELEGRAM BOT LOGIC ---
 SELECT_PRODUCT, SELECT_VARIANT, SELECT_SIZE, SELECT_QUANTITY, CHECKOUT = range(5)
@@ -141,13 +134,23 @@ async def process_initial_order(update: Update, context: ContextTypes.DEFAULT_TY
     if not await check_bot_status(update): return ConversationHandler.END
     context.user_data['cart'] = [] 
     context.user_data['customer_info'] = update.message.text
-    await update.message.reply_text("Details saved! Let's build your order.")
+    context.user_data['is_new_order'] = True # Flag to show the combined text
     return await show_products(update, context)
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [[InlineKeyboardButton(p, callback_data=f"prod_{p}")] for p in INVENTORY.keys()]
-    if update.callback_query: await update.callback_query.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
-    else: await update.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # Check if this is the very first step to combine the messages
+    if context.user_data.get('is_new_order'):
+        text = "Details saved! Let's build your order.\nPlease select a product:"
+        context.user_data['is_new_order'] = False # Reset the flag
+    else:
+        text = "Please select a product:"
+
+    if update.callback_query: 
+        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else: 
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_PRODUCT 
 
 async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -175,26 +178,30 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     context.user_data['current_item']['size'] = query.data.replace("size_", "")
-    keyboard = [
-        [InlineKeyboardButton("50", callback_data="qty_50"), InlineKeyboardButton("100", callback_data="qty_100")],
-        [InlineKeyboardButton("500", callback_data="qty_500"), InlineKeyboardButton("1000", callback_data="qty_1000")]
-    ]
-    await query.edit_message_text("How many units?", reply_markup=InlineKeyboardMarkup(keyboard))
+    
+    # We remove the keyboard and ask them to type the number instead
+    await query.edit_message_text("✏️ Please type the exact quantity you need (e.g., 150):")
     return SELECT_QUANTITY 
 
-async def process_item_and_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def process_quantity_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Catches the manually typed quantity, calculates subtotal, and proceeds to checkout."""
     if not await check_bot_status(update): return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    if query.data.startswith("qty_"):
-        qty = int(query.data.replace("qty_", ""))
-        context.user_data['current_item']['qty'] = qty
-        product = context.user_data['current_item']['product']
-        context.user_data['current_item']['subtotal'] = INVENTORY[product]['price'] * qty
-        context.user_data['cart'].append(context.user_data['current_item'])
     
-    keyboard = [[InlineKeyboardButton("🛒 Add Another", callback_data="add_more")], [InlineKeyboardButton("✅ Generate Invoice", callback_data="finish_order")]]
-    await query.edit_message_text("Item added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
+    user_input = update.message.text.strip()
+    
+    # Make sure they actually typed a number
+    if not user_input.isdigit():
+        await update.message.reply_text("❌ Please enter a valid number for the quantity:")
+        return SELECT_QUANTITY
+
+    qty = int(user_input)
+    context.user_data['current_item']['qty'] = qty
+    product = context.user_data['current_item']['product']
+    context.user_data['current_item']['subtotal'] = INVENTORY[product]['price'] * qty
+    context.user_data['cart'].append(context.user_data['current_item'])
+    
+    keyboard = [[InlineKeyboardButton("🛒 Add Another Item", callback_data="add_more")], [InlineKeyboardButton("✅ Generate Invoice", callback_data="finish_order")]]
+    await update.message.reply_text(f"✅ {qty} units added to your cart! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
 async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -204,20 +211,33 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if query.data == "add_more": return await show_products(update, context)
         
     cart = context.user_data.get('cart', [])
-    invoice = f"📦 *Pack & Wrap - Final Invoice* 📦\n---------------------------------\n*Customer Details:*\n{context.user_data.get('customer_info', '')}\n---------------------------------\n*Order Summary:*\n"
+    
+    # Building a clean, text-only invoice string
+    invoice_text = "📦 Pack & Wrap - Final Invoice 📦\n"
+    invoice_text += "---------------------------------\n"
+    invoice_text += f"Customer Details:\n{context.user_data.get('customer_info', '')}\n"
+    invoice_text += "---------------------------------\n"
+    invoice_text += "Order Summary:\n"
+    
     total = 0
     for idx, item in enumerate(cart, 1):
-        invoice += f"{idx}. {item['product']} ({item['variant']}, {item['size']}) x {item['qty']} = {item['subtotal']} BDT\n"
+        invoice_text += f"{idx}. {item['product']} ({item['variant']}, {item['size']}) x {item['qty']} = {item['subtotal']} BDT\n"
         total += item['subtotal']
         
-    invoice += f"---------------------------------\n*Total Due: {total} BDT*\n*Delivery:* Cash on Delivery\nThank you!"
+    invoice_text += "---------------------------------\n"
+    invoice_text += f"Total Due: {total} BDT\n"
+    invoice_text += "Delivery: Cash on Delivery\n"
+    invoice_text += "Thank you!"
     
     if total > 0:
         global STATS
         STATS["total_orders"] += 1
         STATS["total_revenue"] += total
     
-    await query.edit_message_text(invoice, parse_mode='Markdown')
+    # We wrap the invoice inside an HTML <code> tag to make it tap-to-copy
+    final_message = f"✅ Order complete! Tap the text box below to instantly copy your invoice:\n\n<code>{invoice_text}</code>"
+    
+    await query.edit_message_text(final_message, parse_mode='HTML')
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -225,10 +245,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 def main():
-    # Start the custom HTTP Server in the background
     threading.Thread(target=run_server, daemon=True).start()
 
-    # Start the Telegram Bot
     app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
     order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
 
@@ -238,9 +256,9 @@ def main():
             SELECT_PRODUCT: [CallbackQueryHandler(select_variant, pattern='^prod_')],
             SELECT_VARIANT: [CallbackQueryHandler(select_size, pattern='^var_')],
             SELECT_SIZE: [CallbackQueryHandler(select_quantity, pattern='^size_')],
-            SELECT_QUANTITY: [CallbackQueryHandler(process_item_and_checkout, pattern='^qty_')],
+            # Notice this changed to a MessageHandler to catch the typed numbers
+            SELECT_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity_input)],
             CHECKOUT: [
-                CallbackQueryHandler(process_item_and_checkout, pattern='^qty_'),
                 CallbackQueryHandler(generate_invoice, pattern='^(add_more|finish_order)$')
             ]
         },
