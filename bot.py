@@ -4,20 +4,20 @@ import time
 import threading
 import json
 import hashlib
+import http.server
+import socketserver
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # --- SYSTEM STATE & SECURITY ---
-# Obfuscate the "0127" PIN using ASCII codes (48='0', 49='1', 50='2', 55='7') 
-# so the plain text cannot be found anywhere in this file.
+# Secure PIN generation (0127)
 _secret = "".join(chr(c) for c in (48, 49, 50, 55))
 DASHBOARD_PASSWORD_HASH = hashlib.sha256(_secret.encode()).hexdigest()
-del _secret # Immediately delete the plain-text PIN from the server's memory
+del _secret
 
 BOT_ACTIVE = True 
 BOT_START_TIME = time.time()
@@ -25,64 +25,96 @@ STATS = {
     "total_orders": 0,
     "total_revenue": 0
 }
+PORT = 8000
 
 def verify_password(attempt):
-    """Securely hashes the login attempt and compares it to our hidden hash."""
-    if not attempt:
-        return False
+    if not attempt: return False
     return hashlib.sha256(str(attempt).encode()).hexdigest() == DASHBOARD_PASSWORD_HASH
 
-# --- FLASK WEB SERVER (API) ---
-flask_app = Flask(__name__)
-CORS(flask_app)
+# --- VANILLA PYTHON WEB SERVER (Replaces Flask) ---
+class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
+    extensions_map = http.server.SimpleHTTPRequestHandler.extensions_map.copy()
+    extensions_map.update({'.js': 'application/javascript', '.css': 'text/css'})
 
-@flask_app.route('/api/login', methods=['POST'])
-def login():
-    data = request.json
-    if data and verify_password(data.get('password')):
-        return jsonify({"status": "success"})
-    return jsonify({"status": "error"}), 401
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
+        # Allow CORS just in case you ever need it
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        super().end_headers()
 
-@flask_app.route('/api/stats', methods=['POST'])
-def get_stats():
-    data = request.json
-    if not data or not verify_password(data.get('password')):
-        return jsonify({"error": "Unauthorized"}), 401
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def send_json(self, data, status=200):
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def do_POST(self):
+        """Handle incoming API requests from the dashboard."""
+        global BOT_ACTIVE, STATS, BOT_START_TIME
         
-    uptime_seconds = int(time.time() - BOT_START_TIME)
-    hours, remainder = divmod(uptime_seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-    
-    return jsonify({
-        "status": "online" if BOT_ACTIVE else "maintenance",
-        "uptime": f"{hours}h {minutes}m",
-        "total_orders": STATS["total_orders"],
-        "total_revenue": STATS["total_revenue"]
-    })
-
-@flask_app.route('/api/control', methods=['POST'])
-def control_bot():
-    global BOT_ACTIVE, STATS, BOT_START_TIME
-    data = request.json
-    if not data or not verify_password(data.get('password')):
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    action = data.get('action')
-    if action == 'start':
-        BOT_ACTIVE = True
-    elif action == 'stop':
-        BOT_ACTIVE = False
-    elif action == 'restart':
-        BOT_ACTIVE = True
-        STATS = {"total_orders": 0, "total_revenue": 0}
-        BOT_START_TIME = time.time()
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
         
-    return jsonify({"status": "success", "state": "online" if BOT_ACTIVE else "maintenance"})
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError:
+            return self.send_json({"error": "Invalid JSON"}, 400)
 
-def run_flask():
-    """Runs the web API on port 5001"""
-    flask_app.run(host='0.0.0.0', port=5001, use_reloader=False)
+        # Protect all endpoints with the PIN
+        if not verify_password(data.get('password')):
+            return self.send_json({"error": "Unauthorized"}, 401)
 
+        # 1. Login Endpoint
+        if self.path == '/api/login':
+            return self.send_json({"status": "success"})
+
+        # 2. Stats Endpoint
+        elif self.path == '/api/stats':
+            uptime_seconds = int(time.time() - BOT_START_TIME)
+            hours, remainder = divmod(uptime_seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            return self.send_json({
+                "status": "online" if BOT_ACTIVE else "maintenance",
+                "uptime": f"{hours}h {minutes}m",
+                "total_orders": STATS["total_orders"],
+                "total_revenue": STATS["total_revenue"]
+            })
+
+        # 3. Control Endpoint
+        elif self.path == '/api/control':
+            action = data.get('action')
+            if action == 'start': BOT_ACTIVE = True
+            elif action == 'stop': BOT_ACTIVE = False
+            elif action == 'restart':
+                BOT_ACTIVE = True
+                STATS = {"total_orders": 0, "total_revenue": 0}
+                BOT_START_TIME = time.time()
+            return self.send_json({"status": "success", "state": "online" if BOT_ACTIVE else "maintenance"})
+
+        self.send_json({"error": "Not found"}, 404)
+
+    def do_GET(self):
+        """Serve the HTML dashboard."""
+        path = self.translate_path(self.path)
+        if not os.path.exists(path) and '.' not in self.path:
+            self.path = '/index.html'
+        return super().do_GET()
+
+class ReuseTCPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+def run_server():
+    with ReuseTCPServer(("", PORT), AdminDashboardHandler) as httpd:
+        print(f"🌐 Admin Dashboard running on http://localhost:{PORT}")
+        httpd.serve_forever()
 
 # --- TELEGRAM BOT LOGIC ---
 SELECT_PRODUCT, SELECT_VARIANT, SELECT_SIZE, SELECT_QUANTITY, CHECKOUT = range(5)
@@ -95,11 +127,9 @@ INVENTORY = {
 }
 
 async def check_bot_status(update: Update) -> bool:
-    """Helper to check if the bot is active before processing orders."""
     if not BOT_ACTIVE:
-        msg = "⚙️ Our ordering system is currently offline for maintenance. Please try again later."
-        if update.message:
-            await update.message.reply_text(msg)
+        msg = "⚙️ Our ordering system is currently offline for maintenance."
+        if update.message: await update.message.reply_text(msg)
         elif update.callback_query:
             await update.callback_query.answer("System Offline", show_alert=True)
             await update.callback_query.message.edit_text(msg)
@@ -115,10 +145,8 @@ async def process_initial_order(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [[InlineKeyboardButton(p, callback_data=f"prod_{p}")] for p in INVENTORY.keys()]
-    if update.callback_query:
-        await update.callback_query.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        await update.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
+    if update.callback_query: await update.callback_query.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
+    else: await update.message.reply_text("Please select a product:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_PRODUCT 
 
 async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -164,10 +192,7 @@ async def process_item_and_checkout(update: Update, context: ContextTypes.DEFAUL
         context.user_data['current_item']['subtotal'] = INVENTORY[product]['price'] * qty
         context.user_data['cart'].append(context.user_data['current_item'])
     
-    keyboard = [
-        [InlineKeyboardButton("🛒 Add Another Item", callback_data="add_more")],
-        [InlineKeyboardButton("✅ Generate Invoice", callback_data="finish_order")]
-    ]
+    keyboard = [[InlineKeyboardButton("🛒 Add Another", callback_data="add_more")], [InlineKeyboardButton("✅ Generate Invoice", callback_data="finish_order")]]
     await query.edit_message_text("Item added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
@@ -184,7 +209,7 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         invoice += f"{idx}. {item['product']} ({item['variant']}, {item['size']}) x {item['qty']} = {item['subtotal']} BDT\n"
         total += item['subtotal']
         
-    invoice += f"---------------------------------\n*Total Due: {total} BDT*\n*Delivery:* Cash on Delivery (All over Bangladesh)\nThank you!"
+    invoice += f"---------------------------------\n*Total Due: {total} BDT*\n*Delivery:* Cash on Delivery\nThank you!"
     
     if total > 0:
         global STATS
@@ -199,9 +224,10 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 def main():
-    threading.Thread(target=run_flask, daemon=True).start()
+    # Start the custom HTTP Server in the background
+    threading.Thread(target=run_server, daemon=True).start()
 
-    # Using your official API Key
+    # Start the Telegram Bot
     app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
     order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
 
@@ -221,7 +247,7 @@ def main():
     )
 
     app.add_handler(conv_handler)
-    print("Secure Server Booted. Bot listening, API on port 5001...")
+    print("🤖 Telegram Bot is listening for orders...")
     app.run_polling()
 
 if __name__ == '__main__':
