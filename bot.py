@@ -56,7 +56,7 @@ INVENTORY = {
     "Round Logo Sticker": {"variants": ["Standard"], "sizes": ['1"', '1.5"', '2"', '2.5"'], "price": 2}
 }
 
-# --- SERVER LOGIC (Admin Dashboard) ---
+# --- SERVER LOGIC ---
 class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -149,7 +149,8 @@ async def select_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     if query.data == "back_to_size": return await select_size(update, context)
     context.user_data['current']['size'] = query.data.replace("size_", "")
-    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_size")])
+    # FIXED: Corrected bracket placement below
+    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_size")]]
     await query.edit_message_text("✏️ Please type the Quantity you need (e.g. 500):", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_QUANTITY
 
@@ -180,7 +181,6 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     cart = context.user_data.get('cart', [])
     raw_info = context.user_data.get('customer_info', 'N/A')
     
-    # Precision cleaning: only remove instructional headers
     clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your)", "", raw_info, flags=re.IGNORECASE).strip()
     
     inv = f"📦 Pack & Wrap Invoice\n{'-'*25}\nCustomer Info:\n{clean_info}\n{'-'*25}\nItems:\n"
@@ -190,7 +190,6 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     for idx, item in enumerate(cart, 1):
         inv += f"{idx}. {item['product']} ({item['variant']} {item['size']}) x{item['qty']} = {item['total']} BDT\n"
         subtotal += item['total']
-        # Check for image match
         key = f"{item['product']}_{item['variant']}"
         if key in PRODUCT_IMAGES and PRODUCT_IMAGES[key]:
             img_path = PRODUCT_IMAGES[key]
@@ -200,13 +199,11 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     global STATS; STATS["total_orders"] += 1; STATS["total_revenue"] += total
     
-    # Delete original address and current selection tab
     await delete_msg(context, chat_id, context.user_data.get('user_addr_id'))
     await delete_msg(context, chat_id, context.user_data.get('menu_msg_id'))
 
     final_text = f"✅ Order Confirmed! Tap below to copy:\n\n<code>{inv}</code>"
 
-    # Send result (with local image if it exists)
     if img_path and os.path.exists(img_path):
         with open(img_path, 'rb') as photo:
             await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=final_text, parse_mode=ParseMode.HTML)
