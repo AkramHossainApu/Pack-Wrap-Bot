@@ -23,7 +23,7 @@ from telegram.ext import (
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- SYSTEM STATE ---
+# --- SYSTEM STATE & SECURITY ---
 _secret = "0127"
 DASHBOARD_PASSWORD_HASH = hashlib.sha256(_secret.encode()).hexdigest()
 
@@ -32,6 +32,14 @@ DELIVERY_CHARGE = 60
 BOT_START_TIME = time.time()
 STATS = {"total_orders": 0, "total_revenue": 0}
 PORT = int(os.environ.get("PORT", 10000))
+
+# --- IMAGE MAPPING (Local Assets) ---
+PRODUCT_IMAGES = {
+    "Courier Poly_White": "assets/white_poly.jpg",
+    "Courier Poly_Silver": "assets/silver_poly.jpg",
+    "Printed Courier Poly_White": "assets/printed_white.jpg",
+    "Printed Courier Poly_Silver": "assets/printed_silver.jpg"
+}
 
 # --- INVENTORY DATA ---
 CP_SIZES = ["6/8", "8/10", "9/12", "10/14", "12/16", "14/18", "16/20", "18/24"]
@@ -48,7 +56,7 @@ INVENTORY = {
     "Round Logo Sticker": {"variants": ["Standard"], "sizes": ['1"', '1.5"', '2"', '2.5"'], "price": 2}
 }
 
-# --- SERVER LOGIC ---
+# --- SERVER LOGIC (Admin Dashboard) ---
 class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -60,8 +68,11 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         global BOT_ACTIVE, STATS, DELIVERY_CHARGE
         content_length = int(self.headers.get('Content-Length', 0))
         data = json.loads(self.rfile.read(content_length).decode('utf-8'))
+        
         if hashlib.sha256(data.get('password', '').encode()).hexdigest() != DASHBOARD_PASSWORD_HASH:
             self.send_response(401); self.end_headers(); return
+            
+        res = {"status": "error"}
         if self.path == '/api/stats':
             uptime = f"{int((time.time()-BOT_START_TIME)//3600)}h {int(((time.time()-BOT_START_TIME)%3600)//60)}m"
             res = {"status": "online" if BOT_ACTIVE else "off", "uptime": uptime, "total_orders": STATS["total_orders"], "total_revenue": STATS["total_revenue"]}
@@ -71,6 +82,7 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
             elif action == 'stop': BOT_ACTIVE = False
             elif action == 'set_delivery': DELIVERY_CHARGE = int(data.get('value', 60))
             res = {"status": "success"}
+            
         self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
         self.wfile.write(json.dumps(res).encode())
 
@@ -137,20 +149,17 @@ async def select_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query; await query.answer()
     if query.data == "back_to_size": return await select_size(update, context)
     context.user_data['current']['size'] = query.data.replace("size_", "")
-    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_size")]]
-    # This replaces the selection tab with the prompt
+    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_size")])
     await query.edit_message_text("✏️ Please type the Quantity you need (e.g. 500):", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_QUANTITY
 
 async def process_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     qty_text = update.message.text
     chat_id = update.effective_chat.id
-    
-    # Delete user's typed number immediately
     await delete_msg(context, chat_id, update.message.message_id)
 
     if not qty_text.isdigit():
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text="❌ Please enter a valid number for quantity:")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text="❌ Please enter a valid number:")
         return SELECT_QUANTITY
     
     item = context.user_data['current']
@@ -160,8 +169,7 @@ async def process_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data['cart'].append(item)
     
     keyboard = [[InlineKeyboardButton("🛒 Add More Items", callback_data="add_more")], [InlineKeyboardButton("✅ Finish & Generate Invoice", callback_data="finish")]]
-    # Edit the existing selection tab
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text=f"✅ {qty_text} units of {item['product']} added! What would you like to do next?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text=f"✅ {qty_text} units added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
 async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -172,22 +180,39 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     cart = context.user_data.get('cart', [])
     raw_info = context.user_data.get('customer_info', 'N/A')
     
-    # Selective cleaning: ONLY remove the specific instructional lines
+    # Precision cleaning: only remove instructional headers
     clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your)", "", raw_info, flags=re.IGNORECASE).strip()
     
     inv = f"📦 Pack & Wrap Invoice\n{'-'*25}\nCustomer Info:\n{clean_info}\n{'-'*25}\nItems:\n"
-    subtotal = sum(i['total'] for i in cart)
-    for i, item in enumerate(cart, 1):
-        inv += f"{i}. {item['product']} ({item['variant']} {item['size']}) x{item['qty']} = {item['total']} BDT\n"
+    subtotal = 0
+    img_path = None
+
+    for idx, item in enumerate(cart, 1):
+        inv += f"{idx}. {item['product']} ({item['variant']} {item['size']}) x{item['qty']} = {item['total']} BDT\n"
+        subtotal += item['total']
+        # Check for image match
+        key = f"{item['product']}_{item['variant']}"
+        if key in PRODUCT_IMAGES and PRODUCT_IMAGES[key]:
+            img_path = PRODUCT_IMAGES[key]
     
     total = subtotal + DELIVERY_CHARGE
     inv += f"{'-'*25}\nSubtotal: {subtotal} BDT\nDelivery: {DELIVERY_CHARGE} BDT\nTotal: {total} BDT\n{'-'*25}\nThank you!"
     
     global STATS; STATS["total_orders"] += 1; STATS["total_revenue"] += total
     
-    # DELETE original address message and EDIT selection tab into final invoice
+    # Delete original address and current selection tab
     await delete_msg(context, chat_id, context.user_data.get('user_addr_id'))
-    await query.edit_message_text(f"✅ Order Confirmed! Tap below to copy:\n\n<code>{inv}</code>", parse_mode=ParseMode.HTML)
+    await delete_msg(context, chat_id, context.user_data.get('menu_msg_id'))
+
+    final_text = f"✅ Order Confirmed! Tap below to copy:\n\n<code>{inv}</code>"
+
+    # Send result (with local image if it exists)
+    if img_path and os.path.exists(img_path):
+        with open(img_path, 'rb') as photo:
+            await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=final_text, parse_mode=ParseMode.HTML)
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=final_text, parse_mode=ParseMode.HTML)
+    
     return ConversationHandler.END
 
 async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -213,7 +238,7 @@ def main():
             CHECKOUT: [CallbackQueryHandler(generate_invoice, pattern='^finish$'), CallbackQueryHandler(show_products, pattern='^add_more$')]
         },
         fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)],
-        allow_reentry=True, name="pack_wrap_v4", persistent=True
+        allow_reentry=True, name="pack_wrap_v5", persistent=True
     )
     app.add_handler(conv); app.run_polling()
 
