@@ -62,7 +62,6 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         data = json.loads(self.rfile.read(content_length).decode('utf-8'))
         if hashlib.sha256(data.get('password', '').encode()).hexdigest() != DASHBOARD_PASSWORD_HASH:
             self.send_response(401); self.end_headers(); return
-        res = {"status": "error"}
         if self.path == '/api/stats':
             uptime = f"{int((time.time()-BOT_START_TIME)//3600)}h {int(((time.time()-BOT_START_TIME)%3600)//60)}m"
             res = {"status": "online" if BOT_ACTIVE else "off", "uptime": uptime, "total_orders": STATS["total_orders"], "total_revenue": STATS["total_revenue"]}
@@ -99,14 +98,14 @@ async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         if i+1 < len(items): row.append(InlineKeyboardButton(items[i+1], callback_data=f"prod_{items[i+1]}"))
         keyboard.append(row)
     
-    text = "Details saved! Select a product:" if context.user_data.get('is_new', False) else "Select a product:"
+    text = "✅ Details saved! Please select a product:" if context.user_data.get('is_new', False) else "Please select a product:"
     context.user_data['is_new'] = False
     
     if update.callback_query:
         await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         sent_msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        context.user_data['menu_msg_id'] = sent_msg.message_id # Track the main bot tab
+        context.user_data['menu_msg_id'] = sent_msg.message_id
     return SELECT_PRODUCT
 
 async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -116,7 +115,7 @@ async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data['current'] = {'product': prod}
     keyboard = [[InlineKeyboardButton(v, callback_data=f"var_{v}")] for v in INVENTORY[prod]['variants']]
     keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_prod")])
-    await query.edit_message_text(f"Product: {prod}\nSelect variation:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"📦 Product: {prod}\nSelect variation:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_VARIANT
 
 async def select_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -139,18 +138,19 @@ async def select_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if query.data == "back_to_size": return await select_size(update, context)
     context.user_data['current']['size'] = query.data.replace("size_", "")
     keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_size")]]
-    await query.edit_message_text("✏️ Type the Quantity (e.g. 100):", reply_markup=InlineKeyboardMarkup(keyboard))
+    # This replaces the selection tab with the prompt
+    await query.edit_message_text("✏️ Please type the Quantity you need (e.g. 500):", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECT_QUANTITY
 
 async def process_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     qty_text = update.message.text
     chat_id = update.effective_chat.id
     
-    # Delete the user's typed number immediately
+    # Delete user's typed number immediately
     await delete_msg(context, chat_id, update.message.message_id)
 
     if not qty_text.isdigit():
-        await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text="❌ Enter a valid number:")
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text="❌ Please enter a valid number for quantity:")
         return SELECT_QUANTITY
     
     item = context.user_data['current']
@@ -159,9 +159,9 @@ async def process_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     if 'cart' not in context.user_data: context.user_data['cart'] = []
     context.user_data['cart'].append(item)
     
-    keyboard = [[InlineKeyboardButton("🛒 Add More", callback_data="add_more")], [InlineKeyboardButton("✅ Finish", callback_data="finish")]]
-    # Edit the existing menu instead of replying
-    await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text=f"✅ {qty_text} units added! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton("🛒 Add More Items", callback_data="add_more")], [InlineKeyboardButton("✅ Finish & Generate Invoice", callback_data="finish")]]
+    # Edit the existing selection tab
+    await context.bot.edit_message_text(chat_id=chat_id, message_id=context.user_data['menu_msg_id'], text=f"✅ {qty_text} units of {item['product']} added! What would you like to do next?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
 async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -171,7 +171,9 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     chat_id = update.effective_chat.id
     cart = context.user_data.get('cart', [])
     raw_info = context.user_data.get('customer_info', 'N/A')
-    clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your|Name:|Phone Number:|Full Address:|নাম:|মোবাইল নাম্বার:|ঠিকানা:)", "", raw_info, flags=re.IGNORECASE).strip()
+    
+    # Selective cleaning: ONLY remove the specific instructional lines
+    clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your)", "", raw_info, flags=re.IGNORECASE).strip()
     
     inv = f"📦 Pack & Wrap Invoice\n{'-'*25}\nCustomer Info:\n{clean_info}\n{'-'*25}\nItems:\n"
     subtotal = sum(i['total'] for i in cart)
@@ -183,17 +185,16 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     global STATS; STATS["total_orders"] += 1; STATS["total_revenue"] += total
     
-    # Final Deletions
-    await delete_msg(context, chat_id, context.user_data.get('user_addr_id')) # Delete user address
-    
-    await query.edit_message_text(f"✅ Order Done! Tap to copy:\n\n<code>{inv}</code>", parse_mode=ParseMode.HTML)
+    # DELETE original address message and EDIT selection tab into final invoice
+    await delete_msg(context, chat_id, context.user_data.get('user_addr_id'))
+    await query.edit_message_text(f"✅ Order Confirmed! Tap below to copy:\n\n<code>{inv}</code>", parse_mode=ParseMode.HTML)
     return ConversationHandler.END
 
 async def start_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not BOT_ACTIVE: return
     context.user_data['cart'] = []; context.user_data['is_new'] = True
     context.user_data['customer_info'] = update.message.text
-    context.user_data['user_addr_id'] = update.message.message_id # Save address ID to delete later
+    context.user_data['user_addr_id'] = update.message.message_id
     return await show_products(update, context)
 
 def main():
@@ -212,7 +213,7 @@ def main():
             CHECKOUT: [CallbackQueryHandler(generate_invoice, pattern='^finish$'), CallbackQueryHandler(show_products, pattern='^add_more$')]
         },
         fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)],
-        allow_reentry=True, name="pack_wrap_v3", persistent=True
+        allow_reentry=True, name="pack_wrap_v4", persistent=True
     )
     app.add_handler(conv); app.run_polling()
 
