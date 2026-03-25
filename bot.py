@@ -25,13 +25,15 @@ STATS = {
     "total_orders": 0,
     "total_revenue": 0
 }
-PORT = 8000
+
+# Automatically use the port Render assigns, or default to 10000 locally
+PORT = int(os.environ.get("PORT", 10000))
 
 def verify_password(attempt):
     if not attempt: return False
     return hashlib.sha256(str(attempt).encode()).hexdigest() == DASHBOARD_PASSWORD_HASH
 
-# --- VANILLA PYTHON WEB SERVER (Replaces Flask) ---
+# --- VANILLA PYTHON WEB SERVER ---
 class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
     extensions_map = http.server.SimpleHTTPRequestHandler.extensions_map.copy()
     extensions_map.update({'.js': 'application/javascript', '.css': 'text/css'})
@@ -40,7 +42,6 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
         self.send_header('Pragma', 'no-cache')
         self.send_header('Expires', '0')
-        # Allow CORS just in case you ever need it
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
@@ -113,7 +114,7 @@ class ReuseTCPServer(socketserver.TCPServer):
 
 def run_server():
     with ReuseTCPServer(("", PORT), AdminDashboardHandler) as httpd:
-        print(f"🌐 Admin Dashboard running on http://localhost:{PORT}")
+        print(f"🌐 Admin Dashboard running on port {PORT}")
         httpd.serve_forever()
 
 # --- TELEGRAM BOT LOGIC ---
