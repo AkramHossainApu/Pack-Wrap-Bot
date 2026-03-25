@@ -8,8 +8,18 @@ import http.server
 import socketserver
 import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import (
+    ApplicationBuilder, 
+    CommandHandler, 
+    MessageHandler, 
+    CallbackQueryHandler, 
+    filters, 
+    ContextTypes, 
+    ConversationHandler,
+    PicklePersistence  # Added for memory stability
+)
 
+# Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # --- SYSTEM STATE ---
@@ -45,14 +55,13 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         super().end_headers()
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.end_headers()
-
     def do_POST(self):
         global BOT_ACTIVE, STATS, DELIVERY_CHARGE
         content_length = int(self.headers.get('Content-Length', 0))
-        data = json.loads(self.rfile.read(content_length).decode('utf-8'))
+        try:
+            data = json.loads(self.rfile.read(content_length).decode('utf-8'))
+        except:
+            self.send_response(400); self.end_headers(); return
 
         if hashlib.sha256(data.get('password', '').encode()).hexdigest() != DASHBOARD_PASSWORD_HASH:
             self.send_response(401); self.end_headers(); return
@@ -75,12 +84,9 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.path = '/index.html' if self.path == '/' else self.path
         return super().do_GET()
 
-class ReuseTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
-
 def run_server():
-    """This was the missing function!"""
-    with ReuseTCPServer(("", PORT), AdminDashboardHandler) as httpd:
+    with socketserver.TCPServer(("", PORT), AdminDashboardHandler) as httpd:
+        httpd.allow_reuse_address = True
         print(f"🌐 Dashboard active on port {PORT}")
         httpd.serve_forever()
 
@@ -106,7 +112,7 @@ async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query; await query.answer()
     if query.data == "back_to_prod": return await show_products(update, context)
     
-    prod = query.data.replace("prod_", "") if "prod_" in query.data else context.user_data['current']['product']
+    prod = query.data.replace("prod_", "") if "prod_" in query.data else context.user_data.get('current', {}).get('product', '')
     context.user_data['current'] = {'product': prod}
     
     keyboard = [[InlineKeyboardButton(v, callback_data=f"var_{v}")] for v in INVENTORY[prod]['variants']]
@@ -118,7 +124,7 @@ async def select_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     query = update.callback_query; await query.answer()
     if query.data == "back_to_var": return await select_variant(update, context)
     
-    var = query.data.replace("var_", "") if "var_" in query.data else context.user_data['current']['variant']
+    var = query.data.replace("var_", "") if "var_" in query.data else context.user_data['current'].get('variant', '')
     context.user_data['current']['variant'] = var
     prod = context.user_data['current']['product']
     
@@ -146,9 +152,11 @@ async def process_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("Please enter a valid number:")
         return SELECT_QUANTITY
     
-    item = context.user_data['current']
+    item = context.user_data.get('current', {})
     item['qty'] = int(qty_text)
     item['total'] = item['qty'] * INVENTORY[item['product']]['price']
+    
+    if 'cart' not in context.user_data: context.user_data['cart'] = []
     context.user_data['cart'].append(item)
     
     keyboard = [[InlineKeyboardButton("🛒 Add More", callback_data="add_more")], [InlineKeyboardButton("✅ Finish", callback_data="finish")]]
@@ -159,9 +167,12 @@ async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query; await query.answer()
     if query.data == "add_more": return await show_products(update, context)
     
-    cart = context.user_data['cart']
-    # Filter out instructions from customer info
-    raw_info = context.user_data['customer_info']
+    cart = context.user_data.get('cart', [])
+    if not cart:
+        await query.edit_message_text("Cart is empty. Please start again.")
+        return ConversationHandler.END
+
+    raw_info = context.user_data.get('customer_info', 'N/A')
     clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your)", "", raw_info, flags=re.IGNORECASE).strip()
     
     inv = f"📦 Pack & Wrap Invoice\n{'-'*25}\nCustomer:\n{clean_info}\n{'-'*25}\nItems:\n"
@@ -183,11 +194,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await show_products(update, context)
 
 def main():
-    # 1. Start Web Server
     threading.Thread(target=run_server, daemon=True).start()
     
-    # 2. Start Bot
-    app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
+    # 1. Initialize Persistence
+    persistence = PicklePersistence(filepath="bot_data.pickle")
+
+    app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').persistence(persistence).build()
     
     order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
     conv = ConversationHandler(
@@ -214,7 +226,10 @@ def main():
                 CallbackQueryHandler(show_products, pattern='^add_more$')
             ]
         },
-        fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)]
+        fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)],
+        allow_reentry=True,  # Crucial: allows starting a new order if stuck
+        name="pack_wrap_conversation",
+        persistent=True
     )
     app.add_handler(conv); app.run_polling()
 
