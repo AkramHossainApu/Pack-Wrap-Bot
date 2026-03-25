@@ -10,314 +10,171 @@ import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 
-# Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- SYSTEM STATE & SECURITY ---
-_secret = "".join(chr(c) for c in (48, 49, 50, 55))
+# --- SYSTEM STATE ---
+_secret = "0127"
 DASHBOARD_PASSWORD_HASH = hashlib.sha256(_secret.encode()).hexdigest()
-del _secret
 
 BOT_ACTIVE = True 
+DELIVERY_CHARGE = 60
 BOT_START_TIME = time.time()
-STATS = {
-    "total_orders": 0,
-    "total_revenue": 0
-}
-
+STATS = {"total_orders": 0, "total_revenue": 0}
 PORT = int(os.environ.get("PORT", 10000))
 
-def verify_password(attempt):
-    if not attempt: return False
-    return hashlib.sha256(str(attempt).encode()).hexdigest() == DASHBOARD_PASSWORD_HASH
+# --- INVENTORY DATA ---
+CP_SIZES = ["6/8", "8/10", "9/12", "10/14", "12/16", "14/18", "16/20", "18/24"]
+PCP_SIZES = ["8/10", "9/12", "10/14", "12/16", "14/18"]
 
-# --- VANILLA PYTHON WEB SERVER ---
+INVENTORY = {
+    "Courier Poly": {"variants": ["White", "Silver", "Pink", "Yellow"], "sizes": CP_SIZES, "price": 15},
+    "Printed Courier Poly": {"variants": ["White", "Silver"], "sizes": PCP_SIZES, "price": 18},
+    "Invoice Courier Poly": {"variants": ["Standard"], "sizes": PCP_SIZES, "price": 20},
+    "Die-Cut Box": {"variants": ["Brown", "White"], "sizes": ["Small", "Medium", "Large"], "price": 30},
+    "Carton Box": {"variants": ["Local", "Korean"], "sizes": ["Small", "Medium", "Large"], "price": 35},
+    "Cellophane Poly": {"variants": ["Transparent"], "sizes": ["Small", "Large"], "price": 10},
+    "Bubble Wrap": {"variants": ["Premium"], "sizes": ["1m", "5m", "10m"], "price": 50},
+    "Round Logo Sticker": {"variants": ["Standard"], "sizes": ['1"', '1.5"', '2"', '2.5"'], "price": 2}
+}
+
+# --- SERVER LOGIC ---
 class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
-    extensions_map = http.server.SimpleHTTPRequestHandler.extensions_map.copy()
-    extensions_map.update({'.js': 'application/javascript', '.css': 'text/css'})
-
-    def end_headers(self):
-        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-        self.send_header('Pragma', 'no-cache')
-        self.send_header('Expires', '0')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        super().end_headers()
-
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def send_json(self, data, status=200):
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(data).encode('utf-8'))
-
     def do_POST(self):
-        global BOT_ACTIVE, STATS, BOT_START_TIME
-        
+        global BOT_ACTIVE, STATS, DELIVERY_CHARGE
         content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length)
-        
-        try:
-            data = json.loads(body.decode('utf-8'))
-        except json.JSONDecodeError:
-            return self.send_json({"error": "Invalid JSON"}, 400)
+        data = json.loads(self.rfile.read(content_length).decode('utf-8'))
 
-        if not verify_password(data.get('password')):
-            return self.send_json({"error": "Unauthorized"}, 401)
+        if hashlib.sha256(data.get('password', '').encode()).hexdigest() != DASHBOARD_PASSWORD_HASH:
+            self.send_response(401); self.end_headers(); return
 
-        if self.path == '/api/login':
-            return self.send_json({"status": "success"})
-
-        elif self.path == '/api/stats':
-            uptime_seconds = int(time.time() - BOT_START_TIME)
-            hours, remainder = divmod(uptime_seconds, 3600)
-            minutes, _ = divmod(remainder, 60)
-            return self.send_json({
-                "status": "online" if BOT_ACTIVE else "maintenance",
-                "uptime": f"{hours}h {minutes}m",
-                "total_orders": STATS["total_orders"],
-                "total_revenue": STATS["total_revenue"]
-            })
-
+        if self.path == '/api/stats':
+            uptime = f"{int((time.time()-BOT_START_TIME)//3600)}h {int(((time.time()-BOT_START_TIME)%3600)//60)}m"
+            res = {"status": "online" if BOT_ACTIVE else "off", "uptime": uptime, "total_orders": STATS["total_orders"], "total_revenue": STATS["total_revenue"]}
         elif self.path == '/api/control':
             action = data.get('action')
             if action == 'start': BOT_ACTIVE = True
             elif action == 'stop': BOT_ACTIVE = False
-            elif action == 'restart':
-                BOT_ACTIVE = True
-                STATS = {"total_orders": 0, "total_revenue": 0}
-                BOT_START_TIME = time.time()
-            return self.send_json({"status": "success", "state": "online" if BOT_ACTIVE else "maintenance"})
-
-        self.send_json({"error": "Not found"}, 404)
+            elif action == 'set_delivery': DELIVERY_CHARGE = int(data.get('value', 60))
+            res = {"status": "success"}
+        
+        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.send_header('Access-Control-Allow-Origin', '*'); self.end_headers()
+        self.wfile.write(json.dumps(res).encode())
 
     def do_GET(self):
-        path = self.translate_path(self.path)
-        if not os.path.exists(path) and '.' not in self.path:
-            self.path = '/index.html'
+        self.path = '/index.html' if self.path == '/' else self.path
         return super().do_GET()
 
-class ReuseTCPServer(socketserver.TCPServer):
-    allow_reuse_address = True
-
-def run_server():
-    with ReuseTCPServer(("", PORT), AdminDashboardHandler) as httpd:
-        print(f"🌐 Admin Dashboard running on port {PORT}")
-        httpd.serve_forever()
-
-
-# --- TELEGRAM BOT LOGIC ---
+# --- BOT LOGIC ---
 SELECT_PRODUCT, SELECT_VARIANT, SELECT_SIZE, SELECT_QUANTITY, CHECKOUT = range(5)
-
-# --- NEW FULL ENGLISH INVENTORY ---
-INVENTORY = {
-    "Courier Poly": { 
-        "variants": ["White", "Silver", "Pink", "Yellow"], 
-        "sizes": ["10x14", "12x16", "15x20"], 
-        "price": 15 
-    },
-    "Printed Courier Poly": { 
-        "variants": ["White", "Silver"], 
-        "sizes": ["10x14", "12x16", "15x20"], 
-        "price": 18 
-    },
-    "Invoice Courier Poly": { 
-        "variants": ["Standard"], 
-        "sizes": ["10x14", "12x16"], 
-        "price": 20 
-    },
-    "Die-Cut Box": { 
-        "variants": ["Brown", "White"], 
-        "sizes": ["Small", "Medium", "Large"], 
-        "price": 30 
-    },
-    "Carton Box": { 
-        "variants": ["Local", "Korean"], 
-        "sizes": ["Small", "Medium", "Large"], 
-        "price": 35 
-    },
-    "Cellophane Poly": { 
-        "variants": ["Transparent"], 
-        "sizes": ["Small", "Large"], 
-        "price": 10 
-    },
-    "Bubble Wrap": { 
-        "variants": ["Premium"], 
-        "sizes": ["1 Meter", "5 Meter", "10 Meter"], 
-        "price": 50 
-    },
-    "Round Logo Sticker": { 
-        "variants": ["Standard"], 
-        "sizes": ['1"', '1.5"', '2"', '2.5"'], 
-        "price": 2 
-    }
-}
-
-async def check_bot_status(update: Update) -> bool:
-    if not BOT_ACTIVE:
-        msg = "⚙️ Our ordering system is currently offline for maintenance."
-        if update.message: await update.message.reply_text(msg)
-        elif update.callback_query:
-            await update.callback_query.answer("System Offline", show_alert=True)
-            await update.callback_query.message.edit_text(msg)
-        return False
-    return True
-
-async def process_initial_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Triggered by pasting 'Name:' or sending /start"""
-    if not await check_bot_status(update): return ConversationHandler.END
-    context.user_data['cart'] = [] 
-    
-    # Save the text if they pasted their details. If they just sent /start, save a placeholder.
-    if update.message.text.lower() == '/start':
-        context.user_data['customer_info'] = "Details will be provided at checkout."
-    else:
-        context.user_data['customer_info'] = update.message.text
-
-    context.user_data['is_new_order'] = True # Flag to show the combined text
-    return await show_products(update, context)
 
 async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = []
-    # Dynamic grid layout for products (2 buttons per row)
     items = list(INVENTORY.keys())
     for i in range(0, len(items), 2):
         row = [InlineKeyboardButton(items[i], callback_data=f"prod_{items[i]}")]
-        if i + 1 < len(items):
-            row.append(InlineKeyboardButton(items[i+1], callback_data=f"prod_{items[i+1]}"))
+        if i+1 < len(items): row.append(InlineKeyboardButton(items[i+1], callback_data=f"prod_{items[i+1]}"))
         keyboard.append(row)
     
-    # Check if this is the very first step to combine the messages
-    if context.user_data.get('is_new_order'):
-        text = "Details saved! Let's build your order.\n\nPlease select a product:"
-        context.user_data['is_new_order'] = False # Reset the flag
-    else:
-        text = "Please select a product:"
-
-    if update.callback_query: 
-        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    else: 
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_PRODUCT 
+    text = "Details saved! Select a product:" if context.user_data.get('is_new', False) else "Select a product:"
+    context.user_data['is_new'] = False
+    
+    if update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else: await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_PRODUCT
 
 async def select_variant(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_bot_status(update): return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    product = query.data.replace("prod_", "")
-    context.user_data['current_item'] = {'product': product}
-    keyboard = [[InlineKeyboardButton(v, callback_data=f"var_{v}")] for v in INVENTORY[product]['variants']]
-    await query.edit_message_text(f"Selected: {product}\nSelect variation/color:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_VARIANT 
+    query = update.callback_query; await query.answer()
+    if query.data == "back_to_prod": return await show_products(update, context)
+    
+    prod = query.data.replace("prod_", "") if "prod_" in query.data else context.user_data['current']['product']
+    context.user_data['current'] = {'product': prod}
+    
+    keyboard = [[InlineKeyboardButton(v, callback_data=f"var_{v}")] for v in INVENTORY[prod]['variants']]
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_prod")])
+    await query.edit_message_text(f"Product: {prod}\nSelect variation:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_VARIANT
 
 async def select_size(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_bot_status(update): return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    context.user_data['current_item']['variant'] = query.data.replace("var_", "")
-    product = context.user_data['current_item']['product']
-    keyboard = [[InlineKeyboardButton(s, callback_data=f"size_{s}")] for s in INVENTORY[product]['sizes']]
-    await query.edit_message_text("Great! Now select a size:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_SIZE 
+    query = update.callback_query; await query.answer()
+    if query.data == "back_to_var": return await select_variant(update, context)
+    
+    var = query.data.replace("var_", "") if "var_" in query.data else context.user_data['current']['variant']
+    context.user_data['current']['variant'] = var
+    prod = context.user_data['current']['product']
+    
+    keyboard = []
+    sizes = INVENTORY[prod]['sizes']
+    for i in range(0, len(sizes), 3):
+        row = [InlineKeyboardButton(s, callback_data=f"size_{s}") for s in sizes[i:i+3]]
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="back_to_var")])
+    await query.edit_message_text(f"Selected: {prod} ({var})\nChoose Size:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_SIZE
 
-async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_bot_status(update): return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
-    context.user_data['current_item']['size'] = query.data.replace("size_", "")
+async def select_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query; await query.answer()
+    if query.data == "back_to_size": return await select_size(update, context)
     
-    await query.edit_message_text("✏️ Please type the exact quantity you need (e.g., 150):")
-    return SELECT_QUANTITY 
+    context.user_data['current']['size'] = query.data.replace("size_", "")
+    keyboard = [[InlineKeyboardButton("⬅️ Back", callback_data="back_to_size")]]
+    await query.edit_message_text("✏️ Type the Quantity (e.g. 100):", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SELECT_QUANTITY
 
-async def process_quantity_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_bot_status(update): return ConversationHandler.END
-    
-    user_input = update.message.text.strip()
-    
-    if not user_input.isdigit():
-        await update.message.reply_text("❌ Please enter a valid number for the quantity:")
+async def process_qty(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    qty = update.message.text
+    if not qty.isdigit():
+        await update.message.reply_text("Enter a number:")
         return SELECT_QUANTITY
-
-    qty = int(user_input)
-    context.user_data['current_item']['qty'] = qty
-    product = context.user_data['current_item']['product']
-    context.user_data['current_item']['subtotal'] = INVENTORY[product]['price'] * qty
-    context.user_data['cart'].append(context.user_data['current_item'])
     
-    keyboard = [[InlineKeyboardButton("🛒 Add Another Item", callback_data="add_more")], [InlineKeyboardButton("✅ Generate Invoice", callback_data="finish_order")]]
-    await update.message.reply_text(f"✅ {qty} units added to your cart! What next?", reply_markup=InlineKeyboardMarkup(keyboard))
+    item = context.user_data['current']
+    item['qty'] = int(qty)
+    item['total'] = item['qty'] * INVENTORY[item['product']]['price']
+    context.user_data['cart'].append(item)
+    
+    keyboard = [[InlineKeyboardButton("🛒 Add More", callback_data="add_more")], [InlineKeyboardButton("✅ Finish", callback_data="finish")]]
+    await update.message.reply_text(f"Added {qty} units! Next?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CHECKOUT
 
 async def generate_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not await check_bot_status(update): return ConversationHandler.END
-    query = update.callback_query
-    await query.answer()
+    query = update.callback_query; await query.answer()
     if query.data == "add_more": return await show_products(update, context)
-        
-    cart = context.user_data.get('cart', [])
     
-    invoice_text = "📦 Pack & Wrap - Final Invoice 📦\n"
-    invoice_text += "---------------------------------\n"
-    invoice_text += f"Customer Details:\n{context.user_data.get('customer_info', '')}\n"
-    invoice_text += "---------------------------------\n"
-    invoice_text += "Order Summary:\n"
+    cart = context.user_data['cart']
+    clean_info = re.sub(r"(অর্ডার কনফার্ম করার জন্য আমাদেরকে নিচের তথ্যগুলো দিন|To Confirm Order, Give us your)", "", context.user_data['customer_info'], flags=re.IGNORECASE).strip()
     
-    total = 0
-    for idx, item in enumerate(cart, 1):
-        invoice_text += f"{idx}. {item['product']} ({item['variant']}, {item['size']}) x {item['qty']} = {item['subtotal']} BDT\n"
-        total += item['subtotal']
-        
-    invoice_text += "---------------------------------\n"
-    invoice_text += f"Total Due: {total} BDT\n"
-    invoice_text += "Delivery: Cash on Delivery\n"
-    invoice_text += "Thank you!"
+    inv = f"📦 Pack & Wrap Invoice\n{'-'*25}\nCustomer:\n{clean_info}\n{'-'*25}\nItems:\n"
+    subtotal = sum(i['total'] for i in cart)
+    for i, item in enumerate(cart, 1):
+        inv += f"{i}. {item['product']} ({item['variant']} {item['size']}) x{item['qty']} = {item['total']} BDT\n"
     
-    if total > 0:
-        global STATS
-        STATS["total_orders"] += 1
-        STATS["total_revenue"] += total
+    total = subtotal + DELIVERY_CHARGE
+    inv += f"{'-'*25}\nSubtotal: {subtotal} BDT\nDelivery: {DELIVERY_CHARGE} BDT\nTotal: {total} BDT\n{'-'*25}\nThank you!"
     
-    final_message = f"✅ Order complete! Tap the text box below to instantly copy your invoice:\n\n<code>{invoice_text}</code>"
-    
-    await query.edit_message_text(final_message, parse_mode='HTML')
+    global STATS; STATS["total_orders"] += 1; STATS["total_revenue"] += total
+    await query.edit_message_text(f"✅ Order Done! Tap to copy:\n\n<code>{inv}</code>", parse_mode='HTML')
     return ConversationHandler.END
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Order cancelled.")
-    return ConversationHandler.END
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not BOT_ACTIVE: return
+    context.user_data['cart'] = []; context.user_data['is_new'] = True
+    context.user_data['customer_info'] = update.message.text
+    return await show_products(update, context)
 
 def main():
     threading.Thread(target=run_server, daemon=True).start()
-
     app = ApplicationBuilder().token('8615265508:AAG05nLqzYyI8qe6nZkfAolSiU56RZRLAR4').build()
     
-    # Trigger regex
-    order_trigger = re.compile(r"(Name:|নাম:)", re.IGNORECASE)
-
-    conv_handler = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex(order_trigger), process_initial_order),
-            CommandHandler('start', process_initial_order) # Allows /start command again
-        ],
+    conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r"(Name:|নাম:)", re.I)), start), CommandHandler('start', start)],
         states={
             SELECT_PRODUCT: [CallbackQueryHandler(select_variant, pattern='^prod_')],
-            SELECT_VARIANT: [CallbackQueryHandler(select_size, pattern='^var_')],
-            SELECT_SIZE: [CallbackQueryHandler(select_quantity, pattern='^size_')],
-            SELECT_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_quantity_input)],
-            CHECKOUT: [
-                CallbackQueryHandler(generate_invoice, pattern='^(add_more|finish_order)$')
-            ]
+            SELECT_VARIANT: [CallbackQueryHandler(select_size, pattern='^var_'), CallbackQueryHandler(show_products, pattern='^back_to_prod$')],
+            SELECT_SIZE: [CallbackQueryHandler(select_qty, pattern='^size_'), CallbackQueryHandler(select_variant, pattern='^back_to_var$')],
+            SELECT_QUANTITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_qty), CallbackQueryHandler(select_size, pattern='^back_to_size$')],
+            CHECKOUT: [CallbackQueryHandler(generate_invoice, pattern='^finish$'), CallbackQueryHandler(show_products, pattern='^add_more$')]
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', lambda u, c: ConversationHandler.END)]
     )
+    app.add_handler(conv); app.run_polling()
 
-    app.add_handler(conv_handler)
-    print("🤖 Telegram Bot is listening for orders...")
-    app.run_polling()
-
-if __name__ == '__main__':
-    main()
+if __name__ == '__main__': main()

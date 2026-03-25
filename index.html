@@ -7,66 +7,89 @@
     <style>
         :root { --bg: #121212; --card: #1e1e1e; --text: #fff; --accent: #bb86fc; --red: #cf6679; --green: #03dac6; }
         body { font-family: sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        
+        /* Login Screen */
         #login-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; }
-        #login-screen input { padding: 10px; font-size: 18px; text-align: center; margin-bottom: 10px; border-radius: 5px; border: none; }
-        #login-screen button { padding: 10px 20px; font-size: 16px; background: var(--accent); color: #000; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+        #login-screen input { padding: 12px; font-size: 18px; text-align: center; margin-bottom: 15px; border-radius: 8px; border: 1px solid #333; background: #222; color: white; }
+        #login-screen button { padding: 12px 25px; font-size: 16px; background: var(--accent); color: #000; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; }
         #error-msg { color: var(--red); margin-top: 10px; display: none; }
-        #dashboard { display: none; width: 100%; max-width: 800px; text-align: center; }
+
+        /* Dashboard Layout */
+        #dashboard { display: none; width: 100%; max-width: 900px; text-align: center; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
-        .card { background: var(--card); padding: 20px; border-radius: 8px; border-top: 3px solid var(--accent); }
-        .value { font-size: 28px; font-weight: bold; margin-top: 10px; }
-        .controls { display: flex; gap: 10px; justify-content: center; background: var(--card); padding: 20px; border-radius: 8px; }
-        .btn { padding: 12px 20px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; color: #000; font-size: 14px; }
-        .btn-start { background: var(--green); }
-        .btn-stop { background: var(--red); color: white;}
-        .btn-restart { background: #ffb300; }
+        .card { background: var(--card); padding: 20px; border-radius: 12px; border-top: 3px solid var(--accent); box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        .value { font-size: 28px; font-weight: bold; margin-top: 10px; color: var(--accent); }
+        
+        /* Delivery Input Styling */
+        .delivery-box { margin-top: 15px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+        .delivery-box input { width: 80px; padding: 8px; border-radius: 5px; border: 1px solid var(--accent); background: #121212; color: white; text-align: center; font-size: 16px; }
+        .btn-set { background: var(--accent); color: #000; border: none; padding: 5px 15px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }
+
+        /* Controls */
+        .controls { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; background: var(--card); padding: 25px; border-radius: 12px; }
+        .btn { padding: 12px 24px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; transition: 0.2s; }
+        .btn-start { background: var(--green); color: #000; }
+        .btn-stop { background: var(--red); color: #fff; }
+        .btn-restart { background: #ffb300; color: #000; }
+        .btn:hover { opacity: 0.8; transform: translateY(-2px); }
     </style>
 </head>
 <body>
 
     <div id="login-screen">
-        <h2>Admin Login</h2>
-        <input type="password" id="pass-input" placeholder="Enter PIN">
+        <h1 style="color: var(--accent)">📦 Pack & Wrap</h1>
+        <input type="password" id="pass-input" placeholder="Enter Admin PIN">
         <button onclick="attemptLogin()">Unlock Dashboard</button>
-        <p id="error-msg">Incorrect PIN</p>
+        <p id="error-msg">Incorrect PIN. Try again.</p>
     </div>
 
     <div id="dashboard">
-        <h1 style="color: var(--accent)">📦 Pack & Wrap Command Center</h1>
+        <h1 style="color: var(--accent)">📊 Command Center</h1>
+        
         <div class="grid">
             <div class="card">
                 <div>Bot Status</div>
-                <div class="value" id="status-val">Checking...</div>
+                <div class="value" id="status-val">...</div>
             </div>
             <div class="card">
                 <div>Uptime</div>
                 <div class="value" id="uptime-val">0h 0m</div>
             </div>
             <div class="card">
-                <div>Orders Processed</div>
+                <div>Total Orders</div>
                 <div class="value" id="orders-val">0</div>
             </div>
             <div class="card">
-                <div>Revenue (BDT)</div>
+                <div>Total Revenue</div>
                 <div class="value" id="revenue-val">0</div>
             </div>
+            <div class="card">
+                <div>Delivery Charge (BDT)</div>
+                <div class="delivery-box">
+                    <input type="number" id="delivery-input" value="60">
+                    <button class="btn-set" onclick="updateDelivery()">UPDATE CHARGE</button>
+                </div>
+            </div>
         </div>
+
         <h3>System Controls</h3>
         <div class="controls">
-            <button class="btn btn-start" onclick="controlBot('start')">▶ Turn ON</button>
-            <button class="btn btn-stop" onclick="controlBot('stop')">⏸ Turn OFF</button>
-            <button class="btn btn-restart" onclick="controlBot('restart')">🔄 Hard Restart</button>
+            <button class="btn btn-start" onclick="controlBot('start')">▶ RESUME BOT</button>
+            <button class="btn btn-stop" onclick="controlBot('stop')">⏸ PAUSE BOT</button>
+            <button class="btn btn-restart" onclick="controlBot('restart')">🔄 RESET STATS</button>
         </div>
     </div>
 
     <script>
         let sessionPass = "";
-        const API_BASE = "https://pack-wrap-bot.onrender.com/api"; 
+        // If you are hosting index.html on GitHub, replace "/" with your Render URL
+        // Example: const API_BASE = "https://pack-wrap-bot.onrender.com/api";
+        const API_BASE = "/api"; 
 
         async function attemptLogin() {
             const pass = document.getElementById('pass-input').value;
             try {
-                const res = await fetch(`${API_BASE}/login`, {
+                const res = await fetch(`${API_BASE}/stats`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ password: pass })
@@ -75,11 +98,12 @@
                     sessionPass = pass;
                     document.getElementById('login-screen').style.display = 'none';
                     document.getElementById('dashboard').style.display = 'block';
-                    fetchStats(); setInterval(fetchStats, 5000); 
+                    fetchStats(); 
+                    setInterval(fetchStats, 5000); 
                 } else {
                     document.getElementById('error-msg').style.display = 'block';
                 }
-            } catch (e) { alert("Server connection failed."); }
+            } catch (e) { alert("Cannot connect to Render server."); }
         }
 
         async function fetchStats() {
@@ -99,9 +123,19 @@
             }
         }
 
+        async function updateDelivery() {
+            const charge = document.getElementById('delivery-input').value;
+            const res = await fetch(`${API_BASE}/control`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: sessionPass, action: 'set_delivery', value: charge })
+            });
+            if (res.ok) alert("✅ Delivery charge set to " + charge + " BDT");
+        }
+
         async function controlBot(action) {
             if (!sessionPass) return;
-            if (action === 'restart' && !confirm("Reset stats back to 0. Are you sure?")) return;
+            if (action === 'restart' && !confirm("This will wipe today's stats. Continue?")) return;
             await fetch(`${API_BASE}/control`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
