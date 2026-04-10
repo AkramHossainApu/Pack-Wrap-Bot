@@ -32,6 +32,11 @@
         .btn-stop { background: var(--red); color: #fff; }
         .btn-restart { background: #ffb300; color: #000; }
         .btn:hover { opacity: 0.8; transform: translateY(-2px); }
+        .status-offline { color: var(--red) !important; }
+        .status-online { color: var(--green) !important; }
+        .server-status { font-size: 14px; margin-top: 5px; opacity: 0.8; }
+        .loading-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s ease-in-out infinite; margin-left: 5px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -48,12 +53,13 @@
         
         <div class="grid">
             <div class="card">
-                <div>Bot Status</div>
+                <div>Bot Logic</div>
                 <div class="value" id="status-val">...</div>
+                <div class="server-status" id="server-status">Connecting...</div>
             </div>
             <div class="card">
                 <div>Uptime</div>
-                <div class="value" id="uptime-val">0h 0m</div>
+                <div class="value" id="uptime-val">---</div>
             </div>
             <div class="card">
                 <div>Total Orders</div>
@@ -82,44 +88,59 @@
 
     <script>
         let sessionPass = "";
-        // If you are hosting index.html on GitHub, replace "/" with your Render URL
-        // Example: const API_BASE = "https://pack-wrap-bot.onrender.com/api";
         const API_BASE = "/api"; 
+        const PIN_HASH = "687cdf3caeaa888b000edf4a01d128e3b32026b04fe248aa30ab2faba6d34033";
+
+        async function sha256(message) {
+            const msgBuffer = new TextEncoder().encode(message);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
 
         async function attemptLogin() {
             const pass = document.getElementById('pass-input').value;
-            try {
-                const res = await fetch(`${API_BASE}/stats`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password: pass })
-                });
-                if (res.ok) {
-                    sessionPass = pass;
-                    document.getElementById('login-screen').style.display = 'none';
-                    document.getElementById('dashboard').style.display = 'block';
-                    fetchStats(); 
-                    setInterval(fetchStats, 5000); 
-                } else {
-                    document.getElementById('error-msg').style.display = 'block';
-                }
-            } catch (e) { alert("Cannot connect to Render server."); }
+            const hashed = await sha256(pass);
+            
+            if (hashed === PIN_HASH) {
+                sessionPass = pass;
+                document.getElementById('login-screen').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'block';
+                fetchStats(); 
+                setInterval(fetchStats, 2000); 
+            } else {
+                document.getElementById('error-msg').style.display = 'block';
+                document.getElementById('error-msg').innerText = "Incorrect PIN. Try again.";
+            }
         }
 
         async function fetchStats() {
             if (!sessionPass) return;
-            const res = await fetch(`${API_BASE}/stats`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: sessionPass })
-            });
-            const data = await res.json();
-            if (res.ok) {
-                document.getElementById('status-val').innerText = data.status.toUpperCase();
-                document.getElementById('status-val').style.color = data.status === 'online' ? 'var(--green)' : 'var(--red)';
-                document.getElementById('uptime-val').innerText = data.uptime;
-                document.getElementById('orders-val').innerText = data.total_orders;
-                document.getElementById('revenue-val').innerText = data.total_revenue.toLocaleString();
+            try {
+                const res = await fetch(`${API_BASE}/stats`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: sessionPass })
+                });
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('status-val').innerText = data.status.toUpperCase();
+                    document.getElementById('status-val').className = 'value ' + (data.status === 'online' ? 'status-online' : 'status-offline');
+                    document.getElementById('uptime-val').innerText = data.uptime;
+                    document.getElementById('orders-val').innerText = data.total_orders;
+                    document.getElementById('revenue-val').innerText = data.total_revenue.toLocaleString();
+                    document.getElementById('server-status').innerText = "📡 Server: Connected";
+                    document.getElementById('server-status').style.color = "var(--green)";
+                } else {
+                    document.getElementById('server-status').innerText = "📡 Server: Unauthorized";
+                    document.getElementById('server-status').style.color = "var(--red)";
+                }
+            } catch (e) {
+                document.getElementById('server-status').innerText = "📡 Server: Offline";
+                document.getElementById('server-status').style.color = "var(--red)";
+                document.getElementById('status-val').innerText = "DOWN";
+                document.getElementById('status-val').className = 'value status-offline';
             }
         }
 
@@ -136,12 +157,23 @@
         async function controlBot(action) {
             if (!sessionPass) return;
             if (action === 'restart' && !confirm("This will wipe today's stats. Continue?")) return;
-            await fetch(`${API_BASE}/control`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: sessionPass, action: action })
-            });
-            fetchStats(); 
+            
+            // Immediate UI feedback
+            const statusVal = document.getElementById('status-val');
+            const originalText = statusVal.innerText;
+            statusVal.innerHTML = `${originalText} <span class="loading-spinner"></span>`;
+
+            try {
+                await fetch(`${API_BASE}/control`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: sessionPass, action: action })
+                });
+                setTimeout(fetchStats, 500); // Give server a moment to update state
+            } catch (e) {
+                alert("Action failed: Server offline");
+                fetchStats();
+            }
         }
     </script>
 </body>
