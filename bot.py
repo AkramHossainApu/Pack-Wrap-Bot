@@ -66,9 +66,18 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         global BOT_ACTIVE, STATS, DELIVERY_CHARGE
         content_length = int(self.headers.get('Content-Length', 0))
-        data = json.loads(self.rfile.read(content_length).decode('utf-8'))
-        if hashlib.sha256(data.get('password', '').encode()).hexdigest() != DASHBOARD_PASSWORD_HASH:
-            self.send_response(401); self.end_headers(); return
+        try:
+            body = self.rfile.read(content_length).decode('utf-8')
+            data = json.loads(body) if body else {}
+        except Exception as e:
+            self.send_response(400); self.end_headers(); return
+
+        # Verify password for ALL /api/ calls
+        if self.path.startswith('/api'):
+            if hashlib.sha256(data.get('password', '').encode()).hexdigest() != DASHBOARD_PASSWORD_HASH:
+                self.send_response(401); self.end_headers(); return
+
+        res = None
         if self.path == '/api/stats':
             uptime = f"{int((time.time()-BOT_START_TIME)//3600)}h {int(((time.time()-BOT_START_TIME)%3600)//60)}m"
             res = {"status": "online" if BOT_ACTIVE else "off", "uptime": uptime, "total_orders": STATS["total_orders"], "total_revenue": STATS["total_revenue"]}
@@ -77,9 +86,14 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
             if action == 'start': BOT_ACTIVE = True
             elif action == 'stop': BOT_ACTIVE = False
             elif action == 'set_delivery': DELIVERY_CHARGE = int(data.get('value', 60))
+            elif action == 'restart': STATS = {"total_orders": 0, "total_revenue": 0}
             res = {"status": "success"}
-        self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
-        self.wfile.write(json.dumps(res).encode())
+
+        if res is not None:
+            self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+            self.wfile.write(json.dumps(res).encode())
+        else:
+            self.send_response(404); self.end_headers()
 
     def do_GET(self):
         self.path = '/index.html' if self.path == '/' else self.path
