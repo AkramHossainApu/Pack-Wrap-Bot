@@ -63,6 +63,10 @@ class AdminDashboardHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         super().end_headers()
 
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
     def do_POST(self):
         global BOT_ACTIVE, STATS, DELIVERY_CHARGE
         content_length = int(self.headers.get('Content-Length', 0))
